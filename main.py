@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-import os, io, csv
+import os, io, csv, requests
 from scoring.engine import compute_score
 from backtest.api import router as backtest_router
 
@@ -40,9 +40,38 @@ CITY_MAP = {
     '30238': 'Jonesboro', '30260': 'Morrow', '30269': 'Peachtree City',
     '30277': 'Sharpsburg', '30281': 'Stockbridge', '30291': 'Union City',
     '30294': 'Ellenwood', '30301': 'Atlanta', '30306': 'Atlanta-VH',
-    '30307': 'Atlanta-Inman', '30308': 'Atlanta-Midtown', '30309': 'Atlanta-Midtown',
-    '30316': 'Atlanta-EAV', '30317': 'Kirkwood', '30318': 'Atlanta-W'
+    '30307': 'Atlanta-Inman', '30308': 'Atlanta-Midtown',
+    '30309': 'Atlanta-Midtown', '30316': 'Atlanta-EAV', '30317': 'Kirkwood',
+    '30318': 'Atlanta-W'
 }
+
+# Socrata endpoints for business license data
+SOCRATA_SOURCES = [
+    {
+        "url": "https://data.fultoncountyga.gov/resource/qzwm-k9p9.json",
+        "zip_field": "zip_code",
+        "name_field": "business_name",
+        "type_field": "license_type",
+        "date_field": "issue_date",
+        "zips": ["303"]
+    },
+    {
+        "url": "https://opendata.atlantaga.gov/resource/businesses.json",
+        "zip_field": "zip",
+        "name_field": "business_name",
+        "type_field": "license_type",
+        "date_field": "issue_date",
+        "zips": ["303"]
+    },
+    {
+        "url": "https://data.gwinnettcounty.com/resource/business-licenses.json",
+        "zip_field": "zip_code",
+        "name_field": "business_name",
+        "type_field": "license_type",
+        "date_field": "issue_date",
+        "zips": ["300"]
+    }
+]
 
 def get_db():
     if not engine:
@@ -78,6 +107,44 @@ def get_top_scores(limit: int = 20, db=Depends(get_db)):
             "score_date": str(r.score_date),
         })
     return {"scores": scores, "total": len(scores)}
+
+@app.get("/businesses/{zip_code}")
+def get_businesses(zip_code: str):
+    """Fetch recent business license records for a given zip code from public Socrata APIs."""
+    businesses = []
+    for source in SOCRATA_SOURCES:
+        if not any(zip_code.startswith(p) for p in source["zips"]):
+            continue
+        try:
+            params = {
+                "$where": f"{source['zip_field']}='{zip_code}'",
+                "$limit": 25,
+                "$order": f"{source['date_field']} DESC"
+            }
+            resp = requests.get(source["url"], params=params, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data:
+                    name = item.get(source["name_field"], "").strip()
+                    if not name:
+                        continue
+                    businesses.append({
+                        "name": name,
+                        "type": item.get(source["type_field"], "N/A"),
+                        "date": item.get(source["date_field"], "")[:10] if item.get(source["date_field"]) else "N/A"
+                    })
+        except Exception:
+            continue
+        if businesses:
+            break
+    # Deduplicate by name
+    seen = set()
+    unique = []
+    for b in businesses:
+        if b["name"] not in seen:
+            seen.add(b["name"])
+            unique.append(b)
+    return {"zip_code": zip_code, "businesses": unique[:20], "total": len(unique[:20])}
 
 @app.get("/explain/{zip_code}")
 def explain_zip(zip_code: str, db=Depends(get_db)):
@@ -157,9 +224,7 @@ def get_alerts(limit: int = 50, db=Depends(get_db)):
         "SELECT zip_code, score_jump, prev_score, new_score, fired_at "
         "FROM alerts ORDER BY fired_at DESC LIMIT :limit"
     ), {"limit": limit}).fetchall()
-    return {"alerts": [{"zip_code": r.zip_code, "score_jump": float(r.score_jump or 0),
-        "prev_score": float(r.prev_score or 0), "new_score": float(r.new_score or 0),
-        "fired_at": str(r.fired_at)} for r in rows]}
+    return {"alerts": [{"zip_code": r.zip_code, "score_jump": float(r.score_jump or 0), "prev_score": float(r.prev_score or 0), "new_score": float(r.new_score or 0), "fired_at": str(r.fired_at)} for r in rows]}
 
 @app.get("/export/csv")
 def export_csv(db=Depends(get_db)):
@@ -171,13 +236,12 @@ def export_csv(db=Depends(get_db)):
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["zip_code","city","first_mover_score","business_license_score",
-        "liquor_license_score","school_enrollment_score","google_trends_score",
-        "building_permit_score","score_date"])
+                     "liquor_license_score","school_enrollment_score","google_trends_score",
+                     "building_permit_score","score_date"])
     for r in rows:
-        writer.writerow([r.zip_code, r.city or CITY_MAP.get(r.zip_code,''),
-            r.first_mover_score, r.business_license_score, r.liquor_license_score,
-            r.school_enrollment_score, r.google_trends_score, r.building_permit_score, r.score_date])
+        writer.writerow([r.zip_code, r.city or CITY_MAP.get(r.zip_code,''), r.first_mover_score,
+                         r.business_license_score, r.liquor_license_score, r.school_enrollment_score,
+                         r.google_trends_score, r.building_permit_score, r.score_date])
     output.seek(0)
-    return StreamingResponse(io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=zoneiq_scores.csv"})
+    return StreamingResponse(io.BytesIO(output.getvalue().encode()), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=zoneiq_scores.csv"})
