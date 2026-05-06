@@ -1,7 +1,7 @@
 -- ZoneIQ Database Schema
 CREATE TABLE IF NOT EXISTS zip_scores (
     id SERIAL PRIMARY KEY,
-    zip_code VARCHAR(10) NOT NULL,
+    zip_code VARCHAR(10) NOT NULL UNIQUE,
     city VARCHAR(100),
     state VARCHAR(2) DEFAULT 'GA',
     first_mover_score NUMERIC(5,2),
@@ -27,7 +27,16 @@ CREATE TABLE IF NOT EXISTS alerts (
     fired_at TIMESTAMP DEFAULT NOW()
 );
 
--- Seed 45 Atlanta Metro zip codes
+-- Add unique constraint if not exists (for existing DBs)
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'zip_scores_zip_code_key'
+  ) THEN
+    ALTER TABLE zip_scores ADD CONSTRAINT zip_scores_zip_code_key UNIQUE (zip_code);
+  END IF;
+END $$;
+
+-- Seed/Update 45 Atlanta Metro zip codes (upsert to fix city names)
 INSERT INTO zip_scores (zip_code, city, first_mover_score, business_license_score, liquor_license_score, school_enrollment_score, google_trends_score, building_permit_score, score_date) VALUES
 ('30005', 'Alpharetta', 72.5, 75.0, 68.0, 74.0, 71.0, 75.0, CURRENT_DATE),
 ('30009', 'Alpharetta', 68.3, 70.0, 65.0, 69.0, 67.0, 71.0, CURRENT_DATE),
@@ -73,4 +82,31 @@ INSERT INTO zip_scores (zip_code, city, first_mover_score, business_license_scor
 ('30309', 'Atlanta-Midtown', 79.4, 80.0, 84.0, 77.0, 79.0, 77.0, CURRENT_DATE),
 ('30316', 'Atlanta-EAV', 77.8, 79.0, 83.0, 76.0, 77.0, 74.0, CURRENT_DATE),
 ('30317', 'Kirkwood', 76.2, 78.0, 81.0, 74.0, 76.0, 72.0, CURRENT_DATE),
-('30318', 'Atlanta-W', 74.5, 76.0, 79.0, 72.0, 74.0, 71.0, CURRENT_DATE);
+('30318', 'Atlanta-W', 74.5, 76.0, 79.0, 72.0, 74.0, 71.0, CURRENT_DATE)
+ON CONFLICT (zip_code) DO UPDATE SET
+    city = EXCLUDED.city,
+    score_date = EXCLUDED.score_date;
+
+-- Fix city names for any rows with null city
+UPDATE zip_scores SET city = 'Duluth' WHERE zip_code = '30097' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Sharpsburg' WHERE zip_code = '30277' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Lawrenceville' WHERE zip_code = '30043' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Lawrenceville' WHERE zip_code = '30044' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Acworth' WHERE zip_code = '30101' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Acworth' WHERE zip_code = '30102' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Canton' WHERE zip_code = '30114' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Canton' WHERE zip_code = '30115' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Dallas' WHERE zip_code = '30132' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Kennesaw' WHERE zip_code = '30144' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Kennesaw' WHERE zip_code = '30152' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Powder Springs' WHERE zip_code = '30127' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Fairburn' WHERE zip_code = '30213' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Hampton' WHERE zip_code = '30228' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Jonesboro' WHERE zip_code = '30238' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Morrow' WHERE zip_code = '30260' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Peachtree City' WHERE zip_code = '30269' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Stockbridge' WHERE zip_code = '30281' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Union City' WHERE zip_code = '30291' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Ellenwood' WHERE zip_code = '30294' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Atlanta' WHERE zip_code = '30301' AND (city IS NULL OR city = '');
+UPDATE zip_scores SET city = 'Decatur' WHERE zip_code = '30033' AND (city IS NULL OR city = '');
