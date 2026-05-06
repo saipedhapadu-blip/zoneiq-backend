@@ -45,31 +45,15 @@ CITY_MAP = {
     '30318': 'Atlanta-W'
 }
 
-# Socrata endpoints for business license data
-SOCRATA_SOURCES = [
+# ArcGIS FeatureServer endpoints for business license data
+ARCGIS_SOURCES = [
     {
-        "url": "https://data.fultoncountyga.gov/resource/qzwm-k9p9.json",
-        "zip_field": "zip_code",
-        "name_field": "business_name",
-        "type_field": "license_type",
-        "date_field": "issue_date",
-        "zips": ["303"]
-    },
-    {
-        "url": "https://opendata.atlantaga.gov/resource/businesses.json",
-        "zip_field": "zip",
-        "name_field": "business_name",
-        "type_field": "license_type",
-        "date_field": "issue_date",
-        "zips": ["303"]
-    },
-    {
-        "url": "https://data.gwinnettcounty.com/resource/business-licenses.json",
-        "zip_field": "zip_code",
-        "name_field": "business_name",
-        "type_field": "license_type",
-        "date_field": "issue_date",
-        "zips": ["300"]
+        "url": "https://alphagis.alpharetta.ga.us/maps/rest/services/OpenData/OpenData_BusinessLicenses/FeatureServer/1/query",
+        "zip_field": "ZipCode",
+        "name_field": "DBA",
+        "type_field": "NAICSDescription",
+        "date_field": "BusinessStartDate",
+        "zips": ["30005", "30009", "30022", "30076", "30075"]
     }
 ]
 
@@ -110,33 +94,44 @@ def get_top_scores(limit: int = 20, db=Depends(get_db)):
 
 @app.get("/businesses/{zip_code}")
 def get_businesses(zip_code: str):
-    """Fetch recent business license records for a given zip code from public Socrata APIs."""
+    """Fetch business license records for a zip code from ArcGIS public APIs."""
     businesses = []
-    for source in SOCRATA_SOURCES:
-        if not any(zip_code.startswith(p) for p in source["zips"]):
+    for source in ARCGIS_SOURCES:
+        if zip_code not in source["zips"]:
             continue
         try:
             params = {
-                "$where": f"{source['zip_field']}='{zip_code}'",
-                "$limit": 25,
-                "$order": f"{source['date_field']} DESC"
+                "where": f"{source['zip_field']}='{zip_code}'",
+                "outFields": f"{source['name_field']},{source['type_field']},{source['date_field']}",
+                "f": "json",
+                "resultRecordCount": 25,
+                "orderByFields": f"{source['date_field']} DESC"
             }
-            resp = requests.get(source["url"], params=params, timeout=8)
+            resp = requests.get(source["url"], params=params, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                for item in data:
-                    name = item.get(source["name_field"], "").strip()
+                for feature in data.get("features", []):
+                    attrs = feature.get("attributes", {})
+                    name = (attrs.get(source["name_field"]) or "").strip()
                     if not name:
                         continue
+                    # Convert epoch ms to date string
+                    raw_date = attrs.get(source["date_field"])
+                    if raw_date:
+                        from datetime import datetime, timezone
+                        try:
+                            date_str = datetime.fromtimestamp(raw_date / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                        except Exception:
+                            date_str = "N/A"
+                    else:
+                        date_str = "N/A"
                     businesses.append({
                         "name": name,
-                        "type": item.get(source["type_field"], "N/A"),
-                        "date": item.get(source["date_field"], "")[:10] if item.get(source["date_field"]) else "N/A"
+                        "type": (attrs.get(source["type_field"]) or "N/A").strip(),
+                        "date": date_str
                     })
         except Exception:
             continue
-        if businesses:
-            break
     # Deduplicate by name
     seen = set()
     unique = []
@@ -145,7 +140,6 @@ def get_businesses(zip_code: str):
             seen.add(b["name"])
             unique.append(b)
     return {"zip_code": zip_code, "businesses": unique[:20], "total": len(unique[:20])}
-
 @app.get("/explain/{zip_code}")
 def explain_zip(zip_code: str, db=Depends(get_db)):
     row = db.execute(text(
