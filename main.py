@@ -239,3 +239,105 @@ def export_csv(db=Depends(get_db)):
     output.seek(0)
     return StreamingResponse(io.BytesIO(output.getvalue().encode()), media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=zoneiq_scores.csv"})
+
+
+@app.get("/family-score/{zip_code}")
+def get_family_score(zip_code: str, db=Depends(get_db)):
+    """Family Migration Predictor: scores a zip code for family desirability trajectory over 3 years.
+    Combines school quality, safety trend, and building permit activity."""
+    # --- School data from NCES public API ---
+    school_score = 50
+    school_count = 0
+    school_names = []
+    try:
+        nces_url = "https://services1.arcgis.com/Ua5sjt3LWTPigjyD/arcgis/rest/services/School_Characteristics_Current/FeatureServer/0/query"
+        params = {
+            "where": f"LZIP='{zip_code}' AND SCHOOL_TYPE_TEXT='Public'",
+            "outFields": "SCH_NAME,MEMBER,SCHOOL_LEVEL",
+            "f": "json",
+            "resultRecordCount": 20
+        }
+        resp = requests.get(nces_url, params=params, timeout=10)
+        if resp.status_code == 200:
+            features = resp.json().get("features", [])
+            school_count = len(features)
+            total_enrollment = 0
+            for f in features:
+                attrs = f.get("attributes", {})
+                name = (attrs.get("SCH_NAME") or "").strip()
+                if name:
+                    school_names.append(name)
+                enrollment = attrs.get("MEMBER") or 0
+                total_enrollment += int(enrollment) if str(enrollment).isdigit() else 0
+            # Score: more schools + higher enrollment = better
+            if school_count > 0:
+                school_score = min(100, 40 + (school_count * 10) + (total_enrollment / 500))
+    except Exception:
+        pass
+
+    # --- Crime/safety proxy from existing DB scores ---
+    permit_score = 50
+    safety_score = 50
+    try:
+        row = db.execute(text(
+            "SELECT building_permit_score, school_enrollment_score FROM zip_scores WHERE zip_code = :zip"
+        ), {"zip": zip_code}).fetchone()
+        if row:
+            permit_score = float(row.building_permit_score or 50)
+            safety_score = float(row.school_enrollment_score or 50)  # proxy until crime API integrated
+    except Exception:
+        pass
+
+    # --- Crime data from Atlanta open data (neighborhood-based, approximate) ---
+    crime_penalty = 0
+    try:
+        crime_url = "https://opendata.atlantaga.gov/resource/9w3w-ynjw.json"
+        crime_params = {
+            "$where": f"zip LIKE '{zip_code}%'",
+            "$limit": 100,
+            "$select": "count(*) AS cnt"
+        }
+        cr = requests.get(crime_url, params=crime_params, timeout=8)
+        if cr.status_code == 200:
+            data = cr.json()
+            if data and "cnt" in data[0]:
+                cnt = int(data[0]["cnt"])
+                # Penalty: >50 incidents in recent records = slight penalty
+                crime_penalty = min(20, cnt // 5)
+    except Exception:
+        pass
+
+    # --- Composite Family Migration Score (0-100, 3-year trajectory) ---
+    # Weights: school 40%, permits (growth signal) 35%, safety 25%, minus crime penalty
+    raw = (school_score * 0.40) + (permit_score * 0.35) + (safety_score * 0.25) - crime_penalty
+    family_score = round(max(0, min(100, raw)), 1)
+
+    # Tier label
+    if family_score >= 75:
+        tier = "High Growth"
+        label = "Strong family relocation target in 1-3 years"
+    elif family_score >= 55:
+        tier = "Rising"
+        label = "Improving family desirability trajectory"
+    elif family_score >= 35:
+        tier = "Neutral"
+        label = "Stable but limited growth signals"
+    else:
+        tier = "Declining"
+        label = "Below-average family trajectory indicators"
+
+    return {
+        "zip_code": zip_code,
+        "city": CITY_MAP.get(zip_code, ""),
+        "family_score": family_score,
+        "tier": tier,
+        "label": label,
+        "signals": {
+            "school_score": round(school_score, 1),
+            "school_count": school_count,
+            "school_names": school_names[:5],
+            "permit_score": round(permit_score, 1),
+            "safety_score": round(safety_score, 1),
+            "crime_penalty": crime_penalty
+        }
+    }
